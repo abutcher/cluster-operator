@@ -49,4 +49,8 @@ RUN rm -rf /usr/share/ansible/openshift-ansible/playbooks/cluster-operator/
 # Copy in our playbooks and roles:
 COPY playbooks/cluster-operator ${CLONE_LOCATION}/playbooks/cluster-operator
 
+# Adds fixed ec2_vpc_net.py
+# https://github.com/ansible/ansible/pull/37354
+COPY roles/lib_utils/library ${CLONE_LOCATION}/roles/lib_utils/library
+
 USER 1001:0
