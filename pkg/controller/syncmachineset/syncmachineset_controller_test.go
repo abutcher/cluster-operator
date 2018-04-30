@@ -25,19 +25,21 @@ import (
 	informers "github.com/openshift/cluster-operator/pkg/client/informers_generated/externalversions"
 	"github.com/openshift/cluster-operator/pkg/controller"
 
+	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	kubeclientset "k8s.io/client-go/kubernetes"
 	clientgofake "k8s.io/client-go/kubernetes/fake"
 	clientgotesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 
-	clusterapiv1 "k8s.io/kube-deploy/cluster-api/pkg/apis/cluster/v1alpha1"
-	clusterapiclient "k8s.io/kube-deploy/cluster-api/pkg/client/clientset_generated/clientset"
-	clusterapiclientfake "k8s.io/kube-deploy/cluster-api/pkg/client/clientset_generated/clientset/fake"
-	clusterapiinformers "k8s.io/kube-deploy/cluster-api/pkg/client/informers_generated/externalversions"
+	clusterapiv1 "sigs.k8s.io/cluster-api/pkg/apis/cluster/v1alpha1"
+	clusterapiclient "sigs.k8s.io/cluster-api/pkg/client/clientset_generated/clientset"
+	clusterapiclientfake "sigs.k8s.io/cluster-api/pkg/client/clientset_generated/clientset/fake"
+	clusterapiinformers "sigs.k8s.io/cluster-api/pkg/client/informers_generated/externalversions"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
@@ -62,6 +64,7 @@ func newTestController() (
 	*Controller,
 	cache.Store, // machine set store
 	cache.Store, // cluster version store
+	cache.Store, // clusters store
 	*clientgofake.Clientset,
 	*coclient.Clientset,
 ) {
@@ -71,6 +74,7 @@ func newTestController() (
 
 	controller := NewController(
 		informers.Clusteroperator().V1alpha1().MachineSets(),
+		informers.Clusteroperator().V1alpha1().Clusters(),
 		kubeClient,
 		clusterOperatorClient,
 	)
@@ -80,11 +84,12 @@ func newTestController() (
 	return controller,
 		informers.Clusteroperator().V1alpha1().MachineSets().Informer().GetStore(),
 		informers.Clusteroperator().V1alpha1().ClusterVersions().Informer().GetStore(),
+		informers.Clusteroperator().V1alpha1().Clusters().Informer().GetStore(),
 		kubeClient,
 		clusterOperatorClient
 }
 
-func newTestRemoteClient() (
+func newTestRemoteClusterAPIClient() (
 	cache.Store,
 	cache.Store,
 	*clusterapiclientfake.Clientset,
@@ -156,25 +161,33 @@ func TestMasterMachineSets(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 
-			c, msStore, cvStore, _, _ := newTestController()
+			c, msStore, cvStore, cStore, _, _ := newTestController()
 			cv := newClusterVer(testClusterVerNS, testClusterVerName, testClusterVerUID)
 			cvStore.Add(cv)
 			tLog := c.logger
 
-			_, _, remoteClient := newTestRemoteClient()
+			_, _, remoteClusterAPIClient := newTestRemoteClusterAPIClient()
+			remoteDeploymentClient := &clientgofake.Clientset{}
 			cluster := newTestCluster()
+			cStore.Add(cluster)
 
-			c.buildClients = func(cluster *cov1.MachineSet) (clusterapiclient.Interface, error) {
-				return remoteClient, nil
+			c.buildClients = func(cluster *cov1.MachineSet) (clusterapiclient.Interface, kubeclientset.Interface, error) {
+				return remoteClusterAPIClient, remoteDeploymentClient, nil
 			}
 			if tc.clusterAPIExists {
-				remoteClient.AddReactor("get", "clusters", func(action clientgotesting.Action) (bool, kruntime.Object, error) {
+				remoteClusterAPIClient.AddReactor("get", "clusters", func(action clientgotesting.Action) (bool, kruntime.Object, error) {
 					return true, buildClusterAPICluster(cluster), nil
+				})
+				remoteDeploymentClient.AddReactor("get", "deployments", func(action clientgotesting.Action) (bool, kruntime.Object, error) {
+					return true, newTestClusterAPIDeployment(1), nil
 				})
 			} else {
 				// Add reactor to indicate the remote cluster does not yet have a cluster API object:
-				remoteClient.AddReactor("get", "clusters", func(action clientgotesting.Action) (bool, kruntime.Object, error) {
+				remoteClusterAPIClient.AddReactor("get", "clusters", func(action clientgotesting.Action) (bool, kruntime.Object, error) {
 					return true, nil, apierrors.NewNotFound(action.GetResource().GroupResource(), "")
+				})
+				remoteDeploymentClient.AddReactor("get", "deployments", func(action clientgotesting.Action) (bool, kruntime.Object, error) {
+					return true, newTestClusterAPIDeployment(1), nil
 				})
 			}
 
@@ -194,8 +207,8 @@ func TestMasterMachineSets(t *testing.T) {
 				assert.NoError(t, err)
 			}
 
-			validateExpectedActions(t, tLog, remoteClient.Actions(), tc.expectedActions)
-			validateUnexpectedActions(t, tLog, remoteClient.Actions(), tc.unexpectedActions)
+			validateExpectedActions(t, tLog, remoteClusterAPIClient.Actions(), tc.expectedActions)
+			validateUnexpectedActions(t, tLog, remoteClusterAPIClient.Actions(), tc.unexpectedActions)
 		})
 	}
 }
@@ -304,4 +317,10 @@ func newTestMachineSet(cluster *cov1.Cluster, shortName string, nodeType cov1.No
 		},
 	}
 	return ms
+}
+
+func newTestClusterAPIDeployment(readyReplicas int32) *appsv1.Deployment {
+	deployment := &appsv1.Deployment{}
+	deployment.Status.ReadyReplicas = readyReplicas
+	return deployment
 }

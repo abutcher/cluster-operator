@@ -341,7 +341,7 @@ func NewControllerInitializers() map[string]InitFunc {
 	controllers["deployclusterapi"] = startDeployClusterAPIController
 	controllers["capi-infra"] = startClusterAPIInfraController
 	controllers["capi-machine"] = startMachineAPIController
-	//controllers["syncmachineset"] = startSyncMachineSetController
+	controllers["syncmachineset"] = startSyncMachineSetController
 
 	return controllers
 }
@@ -664,6 +664,7 @@ func startSyncMachineSetController(ctx ControllerContext) (bool, error) {
 	}
 	go syncmachineset.NewController(
 		ctx.InformerFactory.Clusteroperator().V1alpha1().MachineSets(),
+		ctx.InformerFactory.Clusteroperator().V1alpha1().Clusters(),
 		ctx.ClientBuilder.KubeClientOrDie("clusteroperator-syncmachineset-controller"),
 		ctx.ClientBuilder.ClientOrDie("clusteroperator-syncmachineset-controller"),
 	).Run(int(ctx.Options.ConcurrentSyncMachineSetSyncs), ctx.Stop)
