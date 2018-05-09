@@ -514,8 +514,13 @@ func buildClusterAPIMachineSet(machineSet *cov1.MachineSet, clusterVersion *cov1
 	capiMachineSet := clusterapiv1.MachineSet{}
 	capiMachineSet.Name = machineSet.Name
 	capiMachineSet.Namespace = remoteClusterAPINamespace
-	replicas := int32(machineSet.Spec.Size)
+
+	// Set replicas = 0 so that we don't create machines yet.
+	// TODO: remove me when ready to create machines from remote.
+	// replicas := int32(machineSet.Spec.Size)
+	replicas := int32(0)
 	capiMachineSet.Spec.Replicas = &replicas
+
 	capiMachineSet.Spec.Selector.MatchLabels = map[string]string{"machineset": machineSet.Name}
 
 	if machineSet.Annotations == nil {
