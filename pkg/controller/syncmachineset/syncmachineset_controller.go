@@ -65,23 +65,6 @@ const (
 	errorMsgClusterAPINotInstalled = "cannot sync until cluster API is installed and ready"
 )
 
-// ErrClusterAPINotInstalled is used for custom handling when the
-// remote cluster API is not installed or is not yet ready.
-type ErrClusterAPINotInstalled struct {
-	msg string
-}
-
-// NewErrClusterAPINotInstalled creates a new ErrClusterAPINotInstalled.
-func NewErrClusterAPINotInstalled(msg string) *ErrClusterAPINotInstalled {
-	return &ErrClusterAPINotInstalled{
-		msg: msg,
-	}
-}
-
-func (e ErrClusterAPINotInstalled) Error() string {
-	return e.msg
-}
-
 // NewController returns a new *Controller.
 func NewController(
 	machineSetInformer informers.MachineSetInformer,
@@ -136,7 +119,7 @@ type Controller struct {
 	// Used for unit testing
 	enqueueMachineSet func(machineSet *cov1.MachineSet)
 
-	buildClients func(cluster *cov1.MachineSet) (clusterapiclient.Interface, kubeclientset.Interface, error)
+	buildClients func(*cov1.MachineSet) (clusterapiclient.Interface, error)
 
 	// machineSetsLister is able to list/get machine sets and is
 	// populated by the shared informer passed to NewController.
@@ -163,20 +146,65 @@ type Controller struct {
 // queuedMachineSet represents data we need to process a machine set in the queue. This includes
 // data we might need to process deleted objects we can no longer lookup.
 type queuedMachineSet struct {
-	key         string
-	clusterName string
+	key string
 }
 
 func (c *Controller) addMachineSet(obj interface{}) {
 	machineSet := obj.(*cov1.MachineSet)
-	logging.WithMachineSet(c.logger, machineSet).Debugf("Adding machine set")
-	c.enqueueMachineSet(machineSet)
+	msLog := logging.WithMachineSet(c.logger, machineSet)
+	if !isMasterMachineSet(machineSet) {
+		return
+	}
+
+	if !machineSet.Status.ClusterAPIInstalled {
+		msLog.Debugf(errorMsgClusterAPINotInstalled)
+		return
+	}
+
+	coCluster, err := controller.ClusterForMachineSet(machineSet, c.clusterLister)
+	if err != nil {
+		msLog.Debugf("error looking up machineset's cluster: %v", err)
+		return
+	}
+
+	machineSets, err := controller.MachineSetsForCluster(coCluster, c.machineSetsLister)
+	if err != nil {
+		logging.WithCluster(c.logger, coCluster).Debugf("error looking up cluster's machinesets: %v", err)
+		return
+	}
+	for _, ms := range machineSets {
+		logging.WithMachineSet(c.logger, ms).Debugf("Adding machine set")
+		c.enqueueMachineSet(ms)
+	}
 }
 
 func (c *Controller) updateMachineSet(old, cur interface{}) {
 	machineSet := cur.(*cov1.MachineSet)
-	logging.WithMachineSet(c.logger, machineSet).Debugf("Updating machine set")
-	c.enqueueMachineSet(machineSet)
+	msLog := logging.WithMachineSet(c.logger, machineSet)
+	if !isMasterMachineSet(machineSet) {
+		return
+	}
+
+	if !machineSet.Status.ClusterAPIInstalled {
+		msLog.Debugf(errorMsgClusterAPINotInstalled)
+		return
+	}
+
+	coCluster, err := controller.ClusterForMachineSet(machineSet, c.clusterLister)
+	if err != nil {
+		logging.WithMachineSet(c.logger, machineSet).Debugf("error looking up machineset's cluster: %v", err)
+		return
+	}
+
+	machineSets, err := controller.MachineSetsForCluster(coCluster, c.machineSetsLister)
+	if err != nil {
+		logging.WithCluster(c.logger, coCluster).Debugf("error looking up cluster's machinesets: %v", err)
+		return
+	}
+	for _, ms := range machineSets {
+		logging.WithMachineSet(c.logger, ms).Debugf("Updating machine set")
+		c.enqueueMachineSet(ms)
+	}
 }
 
 // Run runs c; will not return until stopCh is closed. workers determines how
@@ -208,8 +236,7 @@ func (c *Controller) enqueue(machineSet *cov1.MachineSet) {
 	}
 
 	c.queue.Add(queuedMachineSet{
-		key:         key,
-		clusterName: machineSet.Labels[controller.ClusterNameLabel],
+		key: key,
 	})
 }
 
@@ -221,14 +248,8 @@ func (c *Controller) enqueueAfter(ms *cov1.MachineSet, after time.Duration) {
 		return
 	}
 
-	clusterName, ok := ms.Labels[controller.ClusterNameLabel]
-	if !ok {
-		utilruntime.HandleError(fmt.Errorf("couldn't get cluster name for machineset: %#v", ms))
-	}
-
 	c.queue.AddAfter(queuedMachineSet{
-		key:         key,
-		clusterName: clusterName,
+		key: key,
 	}, after)
 }
 
@@ -260,16 +281,6 @@ func (c *Controller) handleErr(err error, queuedMS interface{}) {
 
 	logger := c.logger.WithField("machineset", queuedMS)
 
-	_, clusterAPINotInstalled := err.(*ErrClusterAPINotInstalled)
-	if clusterAPINotInstalled {
-		logger.Infof("re-adding machine set after wait: %v", err)
-		// Forget qeuedMS so that we don't track this as a failure.
-		c.queue.Forget(queuedMS)
-		// Requeue queuedMS after 20 seconds.
-		c.queue.AddAfter(queuedMS.(queuedMachineSet), time.Duration(20)*time.Second)
-		return
-	}
-
 	if c.queue.NumRequeues(queuedMS) < maxRetries {
 		logger.Infof("error syncing machine set: %v", err)
 		c.queue.AddRateLimited(queuedMS)
@@ -285,13 +296,13 @@ func isMasterMachineSet(machineSet *cov1.MachineSet) bool {
 	return machineSet.Spec.NodeType == cov1.NodeTypeMaster
 }
 
-func (c *Controller) buildRemoteClusterClients(machineSet *cov1.MachineSet) (clusterapiclient.Interface, kubeclientset.Interface, error) {
+func (c *Controller) buildRemoteClusterClients(machineSet *cov1.MachineSet) (clusterapiclient.Interface, error) {
 	// Load the kubeconfig secret for communicating with the remote cluster:
 
 	// Step 1: Get a cluster from the machineset
 	cluster, err := controller.ClusterForMachineSet(machineSet, c.clusterLister)
 	if err != nil {
-		return nil, nil, fmt.Errorf("unable to retrieve cluster for machineset")
+		return nil, fmt.Errorf("unable to retrieve cluster for machineset")
 	}
 
 	// Step 2: Get the secret ref from the cluster
@@ -311,32 +322,24 @@ func (c *Controller) buildRemoteClusterClients(machineSet *cov1.MachineSet) (clu
 	// Step 3: Retrieve secret
 	secret, err := c.kubeClient.CoreV1().Secrets(machineSet.Namespace).Get(secretName, metav1.GetOptions{})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	secretData := secret.Data["kubeconfig"]
 
 	// Step 4: Generate config from secret data
 	config, err := clientcmd.Load(secretData)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	kubeConfig := clientcmd.NewDefaultClientConfig(*config, &clientcmd.ConfigOverrides{})
 	restConfig, err := kubeConfig.ClientConfig()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Step 5: Return client for remote cluster
-	clusterAPIClient, err := clusterapiclient.NewForConfig(restConfig)
-	if err != nil {
-		return nil, nil, err
-	}
-	deploymentClient, err := kubeclientset.NewForConfig(restConfig)
-	if err != nil {
-		return nil, nil, err
-	}
-	return clusterAPIClient, deploymentClient, nil
+	return clusterapiclient.NewForConfig(restConfig)
 }
 
 // syncMachineSet will sync the machine set with the given key.
@@ -385,46 +388,27 @@ func (c *Controller) syncMasterMachineSet(ms *cov1.MachineSet) error {
 	msLog := logging.WithMachineSet(c.logger, ms)
 	msLog.Debug("loaded master machineset")
 
-	if !ms.Status.ClusterAPIInstalled {
-		msLog.Debugf(errorMsgClusterAPINotInstalled)
-		return fmt.Errorf(errorMsgClusterAPINotInstalled)
-	}
-
 	// Lookup the CO cluster object for this machine set:
 	coCluster, err := c.clusterLister.Clusters(ms.Namespace).Get(ms.Labels[controller.ClusterNameLabel])
-
 	if err != nil {
 		return fmt.Errorf("error looking up machineset's cluster: %v", err)
 	}
 	msLog = logging.WithCluster(msLog, coCluster)
 
-	if !ms.Status.ClusterAPIInstalled {
-		msLog.Debugf(errorMsgClusterAPINotInstalled)
-		return fmt.Errorf(errorMsgClusterAPINotInstalled)
-	}
-
 	// Create the Cluster object if it does not already exist:
-	remoteClusterAPIClient, remoteDeploymentClient, err := c.buildClients(ms)
+	remoteClusterAPIClient, err := c.buildClients(ms)
 	if err != nil {
 		return err
 	}
 
-	// handleErr will requeue machine sets after waiting when the
-	// remote cluster API deployment is not ready.
-	remoteClusterAPIDeployment, err := remoteDeploymentClient.AppsV1().Deployments(remoteClusterAPINamespace).Get(remoteClusterAPIDeploymentName, metav1.GetOptions{})
-	if err != nil {
-		return NewErrClusterAPINotInstalled(fmt.Sprintf("unable to retrieve remote cluster API deployment: %v", err))
-	}
-	if remoteClusterAPIDeployment.Status.ReadyReplicas < 1 {
-		return NewErrClusterAPINotInstalled(errorMsgClusterAPINotInstalled)
-	}
-
 	rCluster, err := remoteClusterAPIClient.ClusterV1alpha1().Clusters(remoteClusterAPINamespace).Get(coCluster.Name, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
-		// Cluster does not exist, create it:
 		msLog.Infof("creating new cluster API object in remote cluster")
-		rCluster = buildClusterAPICluster(coCluster)
-		_, err := remoteClusterAPIClient.ClusterV1alpha1().Clusters(remoteClusterAPINamespace).Create(rCluster)
+		rCluster, err = buildClusterAPICluster(coCluster)
+		if err != nil {
+			return fmt.Errorf("error building cluster api cluster object: %v", err)
+		}
+		_, err = remoteClusterAPIClient.ClusterV1alpha1().Clusters(remoteClusterAPINamespace).Create(rCluster)
 		if err != nil {
 			return fmt.Errorf("error creating cluster object in remote cluster: %v", err)
 		}
@@ -435,6 +419,8 @@ func (c *Controller) syncMasterMachineSet(ms *cov1.MachineSet) error {
 		msLog.Debugf("cluster API object already exists in remote cluster")
 	}
 
+	// Sync compute machine sets here ??
+
 	return nil
 }
 
@@ -443,41 +429,9 @@ func (c *Controller) syncComputeMachineSet(ms *cov1.MachineSet) error {
 	msLog := logging.WithMachineSet(c.logger, ms)
 	msLog.Debug("loaded compute machineset")
 
-	// Lookup the CO cluster object for this machine set and use
-	// that to get the master machine set for the cluster. Continue
-	// syncing generic machine set if the master machine set is
-	// installed (ms.Status.ClusterAPIInstalled == true).
-	// TODO: Set a flag on cluster object once it has been synced
-	// so that we don't have to retrieve the master machine set to
-	// know if we can sync the other machine sets.
-	coCluster, err := c.clusterLister.Clusters(ms.Namespace).Get(ms.Labels[controller.ClusterNameLabel])
-	if err != nil {
-		return fmt.Errorf("error looking up machineset's cluster: %v", err)
-	}
-	coMasterMachineSet, err := c.machineSetsLister.MachineSets(coCluster.Namespace).Get(coCluster.Status.MasterMachineSetName)
-	if err != nil {
-		return fmt.Errorf("error looking up cluster's master machineset: %v", err)
-	}
-
-	// handleErr will requeue machine sets after waiting when the
-	// remote cluster API deployment is not ready.
-	if !coMasterMachineSet.Status.ClusterAPIInstalled {
-		return NewErrClusterAPINotInstalled(errorMsgClusterAPINotInstalled)
-	}
-
-	remoteClusterAPIClient, remoteDeploymentClient, err := c.buildClients(ms)
+	remoteClusterAPIClient, err := c.buildClients(ms)
 	if err != nil {
 		return err
-	}
-
-	// handleErr will requeue machine sets after waiting when the
-	// remote cluster API deployment is not ready.
-	remoteClusterAPIDeployment, err := remoteDeploymentClient.AppsV1().Deployments(remoteClusterAPINamespace).Get(remoteClusterAPIDeploymentName, metav1.GetOptions{})
-	if err != nil {
-		return NewErrClusterAPINotInstalled(fmt.Sprintf("unable to retrieve remote cluster API deployment: %v", err))
-	}
-	if remoteClusterAPIDeployment.Status.ReadyReplicas < 1 {
-		return NewErrClusterAPINotInstalled(errorMsgClusterAPINotInstalled)
 	}
 
 	// Create machineSet object in remote if the machineSet does not already exist.
@@ -493,7 +447,10 @@ func (c *Controller) syncComputeMachineSet(ms *cov1.MachineSet) error {
 			return fmt.Errorf("cannot retrieve cluster version %s/%s: %v", coVersionNamespace, coVersionName, err)
 		}
 
-		remoteMachineSet = buildClusterAPIMachineSet(ms, coClusterVersion)
+		remoteMachineSet, err = buildClusterAPIMachineSet(ms, coClusterVersion)
+		if err != nil {
+			return fmt.Errorf("error building cluster api machineset object: %v", err)
+		}
 		_, err = remoteClusterAPIClient.ClusterV1alpha1().MachineSets(remoteClusterAPINamespace).Create(remoteMachineSet)
 		if err != nil {
 			return fmt.Errorf("error creating machineSet API object in remote cluster: %v", err)
@@ -508,7 +465,7 @@ func (c *Controller) syncComputeMachineSet(ms *cov1.MachineSet) error {
 	return nil
 }
 
-func buildClusterAPIMachineSet(machineSet *cov1.MachineSet, clusterVersion *cov1.ClusterVersion) *clusterapiv1.MachineSet {
+func buildClusterAPIMachineSet(machineSet *cov1.MachineSet, clusterVersion *cov1.ClusterVersion) (*clusterapiv1.MachineSet, error) {
 	machineSet = machineSet.DeepCopy()
 
 	capiMachineSet := clusterapiv1.MachineSet{}
@@ -526,24 +483,36 @@ func buildClusterAPIMachineSet(machineSet *cov1.MachineSet, clusterVersion *cov1
 	if machineSet.Annotations == nil {
 		machineSet.Annotations = map[string]string{}
 	}
-	machineSet.Annotations["cluster-operator.openshift.io/cluster-version"] = string(serializeCOResource(clusterVersion))
+	sClusterVersion, err := serializeCOResource(clusterVersion)
+	if err != nil {
+		return nil, err
+	}
+	machineSet.Annotations["cluster-operator.openshift.io/cluster-version"] = string(sClusterVersion)
 
 	machineTemplate := clusterapiv1.MachineTemplateSpec{}
 	machineTemplate.Labels = map[string]string{"machineset": machineSet.Name}
 	machineTemplate.Spec.Labels = map[string]string{"machineset": machineSet.Name}
+	sMachineSet, err := serializeCOResource(machineSet)
+	if err != nil {
+		return nil, err
+	}
 	machineTemplate.Spec.ProviderConfig.Value = &runtime.RawExtension{
-		Raw: serializeCOResource(machineSet),
+		Raw: sMachineSet,
 	}
 	capiMachineSet.Spec.Template = machineTemplate
 
-	return &capiMachineSet
+	return &capiMachineSet, nil
 }
 
-func buildClusterAPICluster(cluster *cov1.Cluster) *clusterapiv1.Cluster {
+func buildClusterAPICluster(cluster *cov1.Cluster) (*clusterapiv1.Cluster, error) {
 	capiCluster := clusterapiv1.Cluster{}
 	capiCluster.Name = cluster.Name
+	sCluster, err := serializeCOResource(cluster)
+	if err != nil {
+		return nil, err
+	}
 	capiCluster.Spec.ProviderConfig.Value = &runtime.RawExtension{
-		Raw: serializeCOResource(cluster),
+		Raw: sCluster,
 	}
 
 	// These are unused, dummy values.
@@ -551,13 +520,16 @@ func buildClusterAPICluster(cluster *cov1.Cluster) *clusterapiv1.Cluster {
 	capiCluster.Spec.ClusterNetwork.Pods.CIDRBlocks = []string{"10.10.0.0/16"}
 	capiCluster.Spec.ClusterNetwork.Services.CIDRBlocks = []string{"172.30.0.0/16"}
 
-	return &capiCluster
+	return &capiCluster, nil
 }
 
-func serializeCOResource(object runtime.Object) []byte {
+func serializeCOResource(object runtime.Object) ([]byte, error) {
 	serializer := jsonserializer.NewSerializer(jsonserializer.DefaultMetaFactory, coapi.Scheme, coapi.Scheme, false)
 	encoder := coapi.Codecs.EncoderForVersion(serializer, cov1.SchemeGroupVersion)
 	buffer := &bytes.Buffer{}
-	encoder.Encode(object, buffer)
-	return buffer.Bytes()
+	err := encoder.Encode(object, buffer)
+	if err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
 }

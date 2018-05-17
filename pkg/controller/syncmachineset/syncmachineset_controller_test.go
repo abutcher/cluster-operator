@@ -25,7 +25,6 @@ import (
 	informers "github.com/openshift/cluster-operator/pkg/client/informers_generated/externalversions"
 	"github.com/openshift/cluster-operator/pkg/controller"
 
-	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kruntime "k8s.io/apimachinery/pkg/runtime"
@@ -167,27 +166,20 @@ func TestMasterMachineSets(t *testing.T) {
 			tLog := c.logger
 
 			_, _, remoteClusterAPIClient := newTestRemoteClusterAPIClient()
-			remoteDeploymentClient := &clientgofake.Clientset{}
 			cluster := newTestCluster()
 			cStore.Add(cluster)
 
 			c.buildClients = func(cluster *cov1.MachineSet) (clusterapiclient.Interface, kubeclientset.Interface, error) {
-				return remoteClusterAPIClient, remoteDeploymentClient, nil
+				return remoteClusterAPIClient, nil
 			}
 			if tc.clusterAPIExists {
 				remoteClusterAPIClient.AddReactor("get", "clusters", func(action clientgotesting.Action) (bool, kruntime.Object, error) {
 					return true, buildClusterAPICluster(cluster), nil
 				})
-				remoteDeploymentClient.AddReactor("get", "deployments", func(action clientgotesting.Action) (bool, kruntime.Object, error) {
-					return true, newTestClusterAPIDeployment(1), nil
-				})
 			} else {
 				// Add reactor to indicate the remote cluster does not yet have a cluster API object:
 				remoteClusterAPIClient.AddReactor("get", "clusters", func(action clientgotesting.Action) (bool, kruntime.Object, error) {
 					return true, nil, apierrors.NewNotFound(action.GetResource().GroupResource(), "")
-				})
-				remoteDeploymentClient.AddReactor("get", "deployments", func(action clientgotesting.Action) (bool, kruntime.Object, error) {
-					return true, newTestClusterAPIDeployment(1), nil
 				})
 			}
 
@@ -317,10 +309,4 @@ func newTestMachineSet(cluster *cov1.Cluster, shortName string, nodeType cov1.No
 		},
 	}
 	return ms
-}
-
-func newTestClusterAPIDeployment(readyReplicas int32) *appsv1.Deployment {
-	deployment := &appsv1.Deployment{}
-	deployment.Status.ReadyReplicas = readyReplicas
-	return deployment
 }
