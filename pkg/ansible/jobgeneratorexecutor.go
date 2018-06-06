@@ -21,6 +21,7 @@ import (
 	kapi "k8s.io/api/core/v1"
 
 	clustop "github.com/openshift/cluster-operator/pkg/apis/clusteroperator/v1alpha1"
+	clusterapi "sigs.k8s.io/cluster-api/pkg/apis/cluster/v1alpha1"
 )
 
 // JobGeneratorExecutor is used to execute a JobGenerator to create a job for
@@ -29,6 +30,7 @@ type JobGeneratorExecutor struct {
 	jobGenerator        JobGenerator
 	playbooks           []string
 	cluster             *clustop.CombinedCluster
+	clusterNetwork      *clusterapi.ClusterNetworkingConfig
 	clusterVersion      *clustop.ClusterVersion
 	forCluster          bool
 	forMasterMachineSet bool
@@ -38,37 +40,40 @@ type JobGeneratorExecutor struct {
 
 // NewJobGeneratorExecutorForCluster creates a JobGeneratorExecutor
 // that creates a job for the cluster.
-func NewJobGeneratorExecutorForCluster(jobGenerator JobGenerator, playbooks []string, cluster *clustop.CombinedCluster, clusterVersion *clustop.ClusterVersion, infraSize int) *JobGeneratorExecutor {
+func NewJobGeneratorExecutorForCluster(jobGenerator JobGenerator, playbooks []string, cluster *clustop.CombinedCluster, clusterNetwork *clusterapi.ClusterNetworkingConfig, clusterVersion *clustop.ClusterVersion, infraSize int) *JobGeneratorExecutor {
 	return &JobGeneratorExecutor{
 		jobGenerator:   jobGenerator,
 		playbooks:      playbooks,
 		cluster:        cluster,
 		clusterVersion: clusterVersion,
 		forCluster:     true,
+		clusterNetwork: clusterNetwork,
 		infraSize:      &infraSize,
 	}
 }
 
 // NewJobGeneratorExecutorForMasterMachineSet creates a JobGeneratorExecutor
 // that creates a job for the master machine set of a cluster.
-func NewJobGeneratorExecutorForMasterMachineSet(jobGenerator JobGenerator, playbooks []string, cluster *clustop.CombinedCluster, clusterVersion *clustop.ClusterVersion) *JobGeneratorExecutor {
+func NewJobGeneratorExecutorForMasterMachineSet(jobGenerator JobGenerator, playbooks []string, cluster *clustop.CombinedCluster, clusterNetwork *clusterapi.ClusterNetworkingConfig, clusterVersion *clustop.ClusterVersion) *JobGeneratorExecutor {
 	return &JobGeneratorExecutor{
 		jobGenerator:        jobGenerator,
 		playbooks:           playbooks,
 		cluster:             cluster,
 		clusterVersion:      clusterVersion,
+		clusterNetwork:      clusterNetwork,
 		forMasterMachineSet: true,
 	}
 }
 
 // NewJobGeneratorExecutorForComputeMachineSet creates a JobGeneratorExecutor
 // that creates a job for the compute machine sets of a cluster.
-func NewJobGeneratorExecutorForComputeMachineSet(jobGenerator JobGenerator, playbooks []string, cluster *clustop.CombinedCluster, clusterVersion *clustop.ClusterVersion) *JobGeneratorExecutor {
+func NewJobGeneratorExecutorForComputeMachineSet(jobGenerator JobGenerator, playbooks []string, cluster *clustop.CombinedCluster, clusterVersion *clustop.ClusterVersion, clusterNetwork *clusterapi.ClusterNetworkingConfig) *JobGeneratorExecutor {
 	return &JobGeneratorExecutor{
 		jobGenerator:        jobGenerator,
 		playbooks:           playbooks,
 		cluster:             cluster,
 		clusterVersion:      clusterVersion,
+		clusterNetwork:      clusterNetwork,
 		forMasterMachineSet: false,
 	}
 }
@@ -84,6 +89,7 @@ func (e *JobGeneratorExecutor) Execute(name string) (*kbatch.Job, *kapi.ConfigMa
 		vars, err = GenerateClusterWideVars(
 			e.cluster.ClusterDeploymentSpec.ClusterID,
 			&e.cluster.ClusterDeploymentSpec.Hardware,
+			e.clusterNetwork,
 			e.clusterVersion,
 			*e.infraSize,
 		)
@@ -92,6 +98,7 @@ func (e *JobGeneratorExecutor) Execute(name string) (*kbatch.Job, *kapi.ConfigMa
 			e.forMasterMachineSet,
 			e.cluster.ClusterDeploymentSpec.ClusterID,
 			&e.cluster.ClusterDeploymentSpec.Hardware,
+			e.clusterNetwork,
 			e.clusterVersion,
 		)
 	default:
@@ -99,6 +106,7 @@ func (e *JobGeneratorExecutor) Execute(name string) (*kbatch.Job, *kapi.ConfigMa
 			e.forMasterMachineSet,
 			e.cluster.ClusterDeploymentSpec.ClusterID,
 			&e.cluster.ClusterDeploymentSpec.Hardware,
+			e.clusterNetwork,
 			e.clusterVersion,
 			*e.infraSize,
 		)

@@ -26,6 +26,7 @@ import (
 
 	coapi "github.com/openshift/cluster-operator/pkg/apis/clusteroperator/v1alpha1"
 	"github.com/openshift/cluster-operator/pkg/controller"
+	clusterapi "sigs.k8s.io/cluster-api/pkg/apis/cluster/v1alpha1"
 )
 
 // varsTemplate contains some hardcoded variables that are constant for all clusters,
@@ -321,6 +322,10 @@ type clusterParams struct {
 	ClusterAPIImagePullPolicy        corev1.PullPolicy
 	MachineControllerImage           string
 	MachineControllerImagePullPolicy corev1.PullPolicy
+	SDNPluginName                    string
+	ServiceNetworkSubnet             string
+	PodNetworkSubnet                 string
+	ServiceDomain                    string
 }
 
 type machineSetParams struct {
@@ -342,6 +347,7 @@ func GenerateClusterWideVars(
 	clusterID string,
 	hardwareSpec *coapi.ClusterHardwareSpec,
 	clusterVersion *coapi.ClusterVersion,
+	clusterNetwork *clusterapi.ClusterNetworkingConfig,
 	infraSize int,
 ) (string, error) {
 
@@ -385,6 +391,19 @@ func GenerateClusterWideVars(
 		params.MachineControllerImagePullPolicy = *clusterVersion.Spec.MachineControllerImagePullPolicy
 	}
 
+	// Set cluster networking parameters
+	if clusterNetwork.Services != nil {
+		params.ServiceNetworkSubnet = ""
+	}
+
+	if clusterNetwork.Pods != nil {
+		params.PodNetworkSubnet = ""
+	}
+
+	if clusterNetwork.ServiceDomain != "" {
+		params.ServiceDomain = ""
+	}
+
 	var buf bytes.Buffer
 	err = t.Execute(&buf, params)
 	if err != nil {
@@ -421,9 +440,9 @@ func convertVersionToRelease(version string) (string, error) {
 // GenerateClusterWideVarsForMachineSet generates the vars to pass to the
 // ansible playbook that are set at the cluster level for a machine set in
 // that cluster.
-func GenerateClusterWideVarsForMachineSet(isMaster bool, clusterID string, clusterHardware *coapi.ClusterHardwareSpec, clusterVersion *coapi.ClusterVersion) (string, error) {
+func GenerateClusterWideVarsForMachineSet(isMaster bool, clusterID string, clusterHardware *coapi.ClusterHardwareSpec, clusterNetwork *clusterapi.ClusterNetworkingConfig, clusterVersion *coapi.ClusterVersion) (string, error) {
 	// since we haven't been passed an infraSize, just assume minimum size of 1
-	return GenerateClusterWideVarsForMachineSetWithInfraSize(isMaster, clusterID, clusterHardware, clusterVersion, 1)
+	return GenerateClusterWideVarsForMachineSetWithInfraSize(isMaster, clusterID, clusterHardware, clusterNetwork, clusterVersion, 1)
 }
 
 // GenerateClusterWideVarsForMachineSetWithInfraSize generates the vars to pass to the
@@ -433,10 +452,11 @@ func GenerateClusterWideVarsForMachineSetWithInfraSize(
 	isMaster bool,
 	clusterID string,
 	clusterHardware *coapi.ClusterHardwareSpec,
+	clusterNetwork *clusterapi.ClusterNetworkingConfig,
 	clusterVersion *coapi.ClusterVersion,
 	infraSize int,
 ) (string, error) {
-	commonVars, err := GenerateClusterWideVars(clusterID, clusterHardware, clusterVersion, infraSize)
+	commonVars, err := GenerateClusterWideVars(clusterID, clusterHardware, clusterVersion, clusterNetwork, infraSize)
 
 	// Layer in the vars that depend on the ClusterVersion:
 	var buf bytes.Buffer

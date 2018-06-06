@@ -19,6 +19,8 @@ package clusteroperator
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	clusterapi "sigs.k8s.io/cluster-api/pkg/apis/cluster/v1alpha1"
 )
 
 // Annotation constants
@@ -199,6 +201,9 @@ type ClusterDeploymentSpec struct {
 
 	// Hardware specifies the hardware that the cluster will run on
 	Hardware ClusterHardwareSpec
+
+	// Cluster network configuration
+	ClusterNetwork clusterapi.ClusterNetworkingConfig
 
 	// Config specifies cluster-wide OpenShift configuration
 	Config ClusterConfigSpec
